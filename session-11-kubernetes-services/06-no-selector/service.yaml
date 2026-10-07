@@ -1,0 +1,10 @@
+# Service with NO selector: Kubernetes will not build the Endpoints object for it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-legacy-db
+spec:
+  ports:
+    - protocol: TCP
+      port: 3306
+      targetPort: 3306

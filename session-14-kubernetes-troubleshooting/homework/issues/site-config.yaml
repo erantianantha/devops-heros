@@ -1,0 +1,11 @@
+# Fix for containercreating-broken.yaml: create the ConfigMap it mounts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: site-config
+data:
+  default.conf: |
+    server {
+      listen 80;
+      location / { return 200 "site-config loaded\n"; }
+    }

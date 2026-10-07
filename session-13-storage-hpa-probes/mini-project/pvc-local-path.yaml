@@ -1,0 +1,22 @@
+# Fix for pvc.yaml on a multi-node cluster.
+#
+# The "standard" class (k8s.io/minikube-hostpath) creates a hostPath PV with no nodeAffinity.
+# Replicas on another node silently mount an empty local directory, so ReadWriteOnce is
+# never enforced and each node gets its own copy of /data.
+#
+# "local-path" (minikube addon storage-provisioner-rancher) uses WaitForFirstConsumer and
+# writes nodeAffinity into the PV, so the scheduler places every replica on the node that
+# holds the data.
+#   minikube addons enable storage-provisioner-rancher
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-data
+  namespace: production-webapp
+spec:
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi

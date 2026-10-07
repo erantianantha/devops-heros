@@ -1,450 +1,421 @@
-# Session 11: Kubernetes Networking & Services
+# Session 11 — Kubernetes Services & Cluster DNS
 
-Pods are ephemeral. When a Pod crashes, updates, or scales, it is replaced with a new Pod that receives a **brand-new, unpredictable IP address**. If microservices communicated by hardcoding Pod IPs, every restart would trigger a cascading outage.
-
-A **Kubernetes Service** provides a stable virtual IP address (ClusterIP) and a permanent DNS name that never changes, dynamically load-balancing traffic across all healthy backend Pods.
-
----
-
-## What will you learn?
-
-* Understand the fundamental Kubernetes flat networking model and the **3 Golden Rules of Pod Networking**.
-* Decouple Pod lifecycles from network communication using the **Service abstraction**.
-* Demystify port mappings: The definitive difference between **`port`**, **`targetPort`**, and **`nodePort`**.
-* Master the 4 Service Types:
-  * **`ClusterIP`** (Default): Internal cluster-only communication.
-  * **`NodePort`**: Exposes the service on a static high port (`30000–32767`) across every worker node.
-  * **`LoadBalancer`**: Provisions an external cloud load balancer (e.g., AWS NLB/ALB) with a public IP.
-  * **`ExternalName`**: Maps internal service names to external CNAMEs (e.g., AWS RDS endpoints).
-* Understand cluster-internal DNS resolution via **CoreDNS**, `/etc/resolv.conf`, and Fully Qualified Domain Names (FQDNs).
-* Troubleshoot the #1 Kubernetes networking error: **Empty Endpoints (`<none>`)**.
+**Repo:** devops-heros / `session-11-kubernetes-services`
+**Cluster:** minikube v1.39.0, Kubernetes v1.37.0, 2 nodes, Docker driver on macOS (Apple Silicon).
 
 ---
 
-## Why does this matter?
+## Task 1 — The 4 ports
 
-In a distributed microservice architecture, your frontend UI needs to talk to your backend API. You cannot hardcode `http://10.244.1.15:5000` because the moment that pod crashes or scales, that IP address is gone forever.
-
-With a Kubernetes Service, the frontend simply sends requests to `http://yatri-backend-service:80`. CoreDNS resolves that name to the stable virtual IP, and Linux kernel routing (`kube-proxy` via `iptables` or `IPVS`) distributes incoming requests across all healthy backend pods. Without Services, microservice architectures in Kubernetes cannot operate.
-
----
-
-## Core Concepts Explained
-
-### 1. First Question: How Does Kubernetes Pod Networking Work?
-
-In traditional virtual machine or container setups, containers often sit behind private bridges with host port mappings (`-p 8080:80`). In a Kubernetes cluster with thousands of pods across hundreds of nodes, port collision management would be unworkable.
-
-Kubernetes enforces a clean, flat networking model defined by **The 3 Golden Rules**:
-1. **All Pods can communicate with all other Pods without NAT** (across any node in the cluster).
-2. **All Nodes can communicate with all Pods without NAT** (and vice versa).
-3. **The IP address a Pod sees for itself is the exact same IP address every other Pod sees for it**.
-
-#### The Problem: Ephemeral Pod IPs
-Every Pod gets a real, cluster-routable IP address from the Container Network Interface (CNI) plugin (e.g., Calico, Flannel, AWS VPC CNI). However, Pods are disposable.
-
-```text
-Old Backend Pod: 10.244.1.15  --> Terminated / Crashed
-New Backend Pod: 10.244.2.42  --> Starts with a BRAND-NEW IP!
+```
+Client ──► nodePort 30080        (open on every node's IP, 30000–32767)
+              └──► port 8080     (the Service's ClusterIP)
+                      └──► targetPort 80    (the Pod)
+                              └──► containerPort 80   (the process inside the container)
 ```
 
-If any client hardcoded `10.244.1.15`, the application would fail immediately with `Connection Refused`. We need an unchanging intermediary: **The Kubernetes Service**.
+| Port | Declared in | Real effect |
+| :--- | :--- | :--- |
+| `containerPort` | Pod spec | None. Documentation only — the process listens whether you declare it or not. |
+| `targetPort` | Service | The Pod port traffic is forwarded to. Can be a name, not just a number. |
+| `port` | Service | The port the ClusterIP listens on, for in-cluster clients. |
+| `nodePort` | Service (NodePort/LB) | Opens that port on **every** node. |
 
----
-
-### 2. Second Question: What is a Service? (The Corporate Reception Desk Analogy)
-
-Think of a **Large Corporate Enterprise (The Kubernetes Cluster)**:
-* **The Developers / Staff (The Pods):** 5 backend engineers work in the office. They take vacations, change desks, work remotely, or resign. Their locations change constantly.
-* **The Corporate Reception Desk (The Service):** The company maintains one static, unchanging reception desk at the entrance.
-* **The Receptionist's Live Clipboard (The Endpoints List):** The receptionist maintains an up-to-the-minute list of which engineers are currently seated at their desks.
-* When an external visitor or internal colleague needs help, they never wander the building searching for an individual engineer's desk. They walk up to the **Reception Desk (Service Virtual IP)**. The receptionist hands the inquiry to whichever engineer is currently available and healthy.
-
-```mermaid
-flowchart TD
-    Client["Client / Frontend Pod"] -->|Calls http://yatri-backend-service:80| VIP["Service Virtual IP: ClusterIP (10.96.145.82:80)"]
-
-    subgraph ServiceRouting ["kube-proxy / iptables (Load Balancing)"]
-        VIP -->|targetPort: 5000| PodA["Backend Pod 1 (10.244.0.15:5000)"]
-        VIP -->|targetPort: 5000| PodB["Backend Pod 2 (10.244.0.22:5000)"]
-        VIP -->|targetPort: 5000| PodC["Backend Pod 3 (10.244.0.38:5000)"]
-    end
+```bash
+kubectl explain service.spec.ports
 ```
 
 ---
 
-### 3. Third Question: What is the Difference Between `port`, `targetPort`, and `nodePort`?
+## Task 2 — ClusterIP (`01-clusterip/`)
 
-This is one of the most common points of confusion for Kubernetes beginners. Memorize the **Three Ports Triangle**:
+Default type. Internal-only virtual IP, load balanced across the matching pods.
 
-```text
-External Internet / User Browser
-       |
-       | hits physical machine on high port (30000 - 32767)
-       v
-+--------------+
-|   nodePort   |  (e.g. 30080 on the Worker Node IP)
-+--------------+
-       |
-       | forwards internally inside cluster
-       v
-+--------------+
-|     port     |  (Port exposed by the Service inside the cluster, e.g. 80)
-+--------------+
-       |
-       | forwards into container process
-       v
-+--------------+
-|  targetPort  |  (Port where the container app is actually listening, e.g. 5000)
-+--------------+
+```bash
+kubectl apply -f 01-clusterip/app-deployment.yaml -f 01-clusterip/service.yaml -f 01-clusterip/client-pod.yaml
 ```
 
-* **`port` (The Front Door):** The port exposed by the Service to other services *inside* the cluster. Standard HTTP is `80`.
-* **`targetPort` (The Back Door):** The port where the application process inside the container is actively listening (e.g., Flask on `5000`, Spring Boot on `8080`).
-* **`nodePort` (The Physical Machine Door):** A static port allocated across every worker node's physical IP address from the range `30000–32767`.
+```
+NAME                                 STATUS    IP            NODE
+web-app-clusterip-66865d4855-4tx8n   Running   10.244.1.58   minikube-m02
+web-app-clusterip-66865d4855-c49fh   Running   10.244.1.57   minikube-m02
+web-app-clusterip-66865d4855-qg4zd   Running   10.244.0.28   minikube
 
-| Port Field | Where It Listens | Who Connects to It? | Example Value |
-| :--- | :--- | :--- | :--- |
-| **`port`** | Service Virtual IP (ClusterIP) | Internal microservices inside the cluster | `80` |
-| **`targetPort`** | Container inside the Pod | Service load balancer (`kube-proxy`) | `5000` |
-| **`nodePort`** | Worker Node physical IP | External clients or edge load balancers | `30080` |
+NAME                    TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+web-service-clusterip   ClusterIP   10.104.130.176   <none>        8080/TCP   8s
+
+NAME                          ADDRESSTYPE   PORTS   ENDPOINTS
+web-service-clusterip-hhtmw   IPv4          80      10.244.1.58,10.244.1.57,10.244.0.28
+```
+
+The EndpointSlice is built by the endpoint controller from the label selector — that list is what kube-proxy actually programs.
+
+```bash
+kubectl exec curl-client -- curl -s http://web-service-clusterip:8080 | grep -i '<title>'
+kubectl exec curl-client -- curl -s http://web-service-clusterip.default.svc.cluster.local:8080 | grep -i '<title>'
+```
+
+```
+<title>Welcome to nginx!</title>
+<title>Welcome to nginx!</title>
+```
+
+Short name and full FQDN both work — see Task 8 for why.
+
+![ClusterIP](./screenshots/02-clusterip.png)
 
 ---
 
-### 4. Fourth Question: What Are the 4 Kubernetes Service Types?
+## Task 3 — NodePort (`02-nodeport/`)
 
-```mermaid
-flowchart TD
-    subgraph Types ["Kubernetes Service Types"]
-        CIP["ClusterIP (Default)\n- Internal cluster VIP\n- Unreachable from internet"]
-        NP["NodePort\n- Opens port 30000-32767 on all nodes\n- Direct access via NodeIP:NodePort"]
-        LB["LoadBalancer\n- Provisions Cloud Load Balancer\n- Assigns public IP / DNS (AWS NLB/ALB)"]
-        EN["ExternalName\n- Maps internal name to external CNAME\n- No proxying or selectors"]
-    end
+```bash
+kubectl apply -f 02-nodeport/app-deployment.yaml -f 02-nodeport/service.yaml
+kubectl get svc web-service-nodeport
 ```
 
-1. **`ClusterIP` (Default):** Exposes the Service on an internal IP reachable only from within the cluster. Ideal for internal microservice-to-microservice APIs, databases, and caching layers.
-2. **`NodePort`:** Builds on top of ClusterIP. Allocates a port in the range `30000–32767` on every node's IP. Anyone with network access to the node can connect via `http://<Node-IP>:<NodePort>`.
-3. **`LoadBalancer`:** Builds on top of NodePort and ClusterIP. Asks the cloud provider (AWS, GCP, Azure) to provision an external public Load Balancer that routes incoming internet traffic to the cluster's NodePorts.
-4. **`ExternalName`:** Acts as an internal DNS alias (CNAME). When a pod requests `database-service`, CoreDNS returns the external domain (e.g., `mydb.rds.amazonaws.com`).
+```
+NAME                   TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+web-service-nodeport   NodePort   10.101.138.21   <none>        80:30080/TCP   3s
+
+NAME                              STATUS    NODE
+web-app-nodeport-6c8f48bd-6mhvl   Running   minikube
+web-app-nodeport-6c8f48bd-fnmnp   Running   minikube-m02
+
+$ minikube ssh -- curl -sI http://localhost:30080 | head -1
+HTTP/1.1 200 OK
+```
+
+`80:30080/TCP` = ClusterIP port 80, node port 30080. Port 30080 is open on **both** nodes even though each only runs one pod — kube-proxy forwards across nodes. Hitting it from macOS is a separate problem, see Task 12.
+
+![NodePort](./screenshots/03-nodeport.png)
 
 ---
 
-### 5. Fifth Question: How Does Kubernetes Internal DNS (CoreDNS) Work?
+## Task 4 — LoadBalancer (`03-loadbalancer/`)
 
-Kubernetes runs a cluster-internal DNS service called **CoreDNS**. Every time a Service is created, CoreDNS automatically registers an A-record:
-
-$$\text{Format: } \mathbf{\langle service\text{-}name\rangle.\langle namespace\rangle.svc.cluster.local}$$
-
-* Within the **same namespace**: A pod can simply call `http://yatri-backend-service:80`.
-* From a **different namespace**: A pod calls `http://yatri-backend-service.<namespace>.svc.cluster.local:80`.
-
-#### The Container Configuration: `/etc/resolv.conf`
-When Kubernetes starts a Pod, it configures DNS lookups automatically:
-```text
-nameserver 10.96.0.10
-search default.svc.cluster.local svc.cluster.local cluster.local
-options ndots:5
+```bash
+kubectl apply -f 03-loadbalancer/app-deployment.yaml -f 03-loadbalancer/service.yaml
+kubectl get svc web-service-loadbalancer
 ```
-Because `default.svc.cluster.local` is in the search list, typing `yatri-backend-service` automatically completes to the full FQDN and resolves to the Service's ClusterIP!
+
+```
+NAME                       TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+web-service-loadbalancer   LoadBalancer   10.98.109.246   <pending>     80:32045/TCP   1s
+
+$ kubectl get svc web-service-loadbalancer \
+    -o jsonpath='{.spec.type}{" | clusterIP="}{.spec.clusterIP}{" | nodePort="}{.spec.ports[0].nodePort}'
+LoadBalancer | clusterIP=10.98.109.246 | nodePort=32045
+
+$ minikube ssh -- curl -sI http://localhost:32045 | head -1
+HTTP/1.1 200 OK
+```
+
+Two things to notice:
+
+1. **LoadBalancer is a superset** — Kubernetes silently allocated a ClusterIP *and* a NodePort (32045) underneath it. The cloud LB just points at that node port.
+2. **`EXTERNAL-IP` stays `<pending>`** because minikube has no cloud controller to call. On EKS/GKE/AKS this field fills in with a real LB address in a minute or two.
+
+To fake it locally, run in a second terminal (needs sudo, and the terminal must stay open):
+
+```bash
+minikube tunnel      # EXTERNAL-IP becomes 127.0.0.1, then: curl http://localhost
+```
+
+![LoadBalancer](./screenshots/04-loadbalancer.png)
 
 ---
 
-### 6. Sixth Question: What Causes "Empty Endpoints"? (The #1 Triage Scenario)
+## Task 5 — ExternalName (`04-externalname/`)
 
-A Service is just a routing abstraction. The actual destination pod IPs are tracked in an **`Endpoints`** (or `EndpointSlice`) object created by the Endpoints Controller.
+No selector, no endpoints, no proxying — CoreDNS just returns a CNAME.
 
-If a Service's `spec.selector` has even a single character typo compared to the Pod's `metadata.labels`, the Endpoints Controller finds zero matching pods.
-* The Service is created successfully without errors.
-* Running `kubectl get endpoints <service>` shows `<none>`.
-* Incoming requests hang and fail with `Connection Timed Out` or `HTTP 503`.
+```bash
+kubectl apply -f 04-externalname/service.yaml -f 04-externalname/client-pod.yaml
+kubectl get svc external-database-service
+```
+
+```
+NAME                        TYPE           CLUSTER-IP   EXTERNAL-IP        PORT(S)   AGE
+external-database-service   ExternalName   <none>       nencyravaliya.me   <none>    1s
+
+$ kubectl get endpointslice -l kubernetes.io/service-name=external-database-service
+No resources found in default namespace.
+
+$ kubectl exec dns-test-client -- nslookup external-database-service
+external-database-service.default.svc.cluster.local   canonical name = nencyravaliya.me
+```
+
+`nencyravaliya.me` has no A record, so re-pointed the alias at a domain that resolves to prove traffic actually flows:
+
+```bash
+kubectl patch svc external-database-service -p '{"spec":{"externalName":"api.github.com"}}'
+```
+
+```
+Address: 20.207.73.85
+external-database-service.default.svc.cluster.local   canonical name = api.github.com
+
+$ kubectl exec dns-test-client -- curl -sk -o /dev/null -w 'HTTP %{http_code}' https://external-database-service
+HTTP 400 via the alias
+```
+
+400 is GitHub rejecting the Host header (it is the alias name, not `api.github.com`) — the packet still got there. Real use: point `db-service` at an RDS endpoint so app code never hardcodes the cloud hostname, and so you can swap dev/prod targets by editing one Service.
+
+![ExternalName](./screenshots/05-externalname.png)
 
 ---
 
-## Step-by-Step Hands-on Labs
+## Task 6 — Headless service (`05-headless/`)
 
-All manifests for this lab are located in:
-* `./deployment/backend-deployment.yaml`
-* `./service/clusterip.yaml`
-* `./service/nodeport.yaml`
-* `./service/loadbalancer.yaml`
-* `./dns-test/curl-test-pod.yaml`
-* `./troubleshooting/empty-endpoints.yaml`
+`clusterIP: None` → no virtual IP, no load balancing. DNS returns every pod IP directly.
+
+```bash
+kubectl apply -f 05-headless/service.yaml -f 05-headless/app-statefulset.yaml -f 05-headless/client-pod.yaml
+```
+
+```
+NAME                   TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+web-service-headless   ClusterIP   None         <none>        80/TCP    4s
+
+NAME             IP            NODE
+web-stateful-0   10.244.1.67   minikube-m02
+web-stateful-1   10.244.0.31   minikube
+web-stateful-2   10.244.1.68   minikube-m02
+
+$ kubectl exec headless-dns-client -- nslookup web-service-headless
+Address: 10.244.1.67
+Address: 10.244.1.68
+Address: 10.244.0.31          <- three A records, one per pod
+```
+
+Each pod also gets its own stable DNS name:
+
+```bash
+kubectl exec headless-dns-client -- nslookup web-stateful-0.web-service-headless.default.svc.cluster.local
+kubectl exec headless-dns-client -- curl -s http://web-stateful-0.web-service-headless | grep -i '<title>'
+```
+
+```
+Name:    web-stateful-0.web-service-headless.default.svc.cluster.local
+Address: 10.244.1.67
+
+<title>Welcome to nginx!</title>
+```
+
+This is why Kafka, Cassandra and MongoDB replica sets need a headless Service: a client must reach *a specific* broker/primary, not "any pod".
+
+![Headless](./screenshots/06-headless.png)
 
 ---
 
-### Lab 1: Deploy Backend Pods
+## Task 7 — Service without a selector (`06-no-selector/`)
 
-Before creating a Service, deploy 3 backend pods running a lightweight Python HTTP server on port 5000:
-
-```bash
-kubectl apply -f deployment/backend-deployment.yaml
-```
-* Explanation: Deploys 3 replicas with label `app: yatri-backend` listening on container port 5000.
-
-Verify pods are running:
-```bash
-kubectl get pods -l app=yatri-backend -o wide
-```
-
-Expected output:
-```text
-NAME                            READY   STATUS    RESTARTS   AGE   IP            NODE
-yatri-backend-7f89d54b8-2k4l9   1/1     Running   0          25s   10.244.0.15   minikube
-yatri-backend-7f89d54b8-8p2m1   1/1     Running   0          25s   10.244.0.22   minikube
-yatri-backend-7f89d54b8-x9q4t   1/1     Running   0          25s   10.244.0.38   minikube
-```
-
-Notice that each pod has a unique private IP address (`10.244.0.15`, etc.).
-
----
-
-### Lab 2: Expose Backend via ClusterIP
-
-Deploy the internal ClusterIP service:
+Drop the selector and Kubernetes stops managing endpoints — you write them yourself.
 
 ```bash
-kubectl apply -f service/clusterip.yaml
+kubectl apply -f 06-no-selector/service.yaml
+kubectl get endpoints external-legacy-db
 ```
-* Explanation: Creates a virtual IP listening on port 80 and forwarding to targetPort 5000.
 
-Inspect the service:
+```
+Error from server (NotFound): endpoints "external-legacy-db" not found
+```
+
 ```bash
-kubectl get svc yatri-backend-service
+kubectl apply -f 06-no-selector/endpoints.yaml     # name MUST equal the Service name
+kubectl get endpoints external-legacy-db
 ```
 
-Expected output:
-```text
-NAME                    TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
-yatri-backend-service   ClusterIP   10.96.145.82    <none>        80/TCP    12s
+```
+NAME                 ENDPOINTS            AGE
+external-legacy-db   192.168.1.150:3306   0s
 ```
 
-Now inspect the associated Endpoints object:
-```bash
-kubectl get endpoints yatri-backend-service
-```
+Pods now reach an off-cluster MySQL box via a normal cluster DNS name.
 
-Expected output:
-```text
-NAME                    ENDPOINTS                                            AGE
-yatri-backend-service   10.244.0.15:5000,10.244.0.22:5000,10.244.0.38:5000   30s
-```
-* Explanation: The Endpoints Controller automatically matched `selector: app=yatri-backend` and populated the exact IPs and container ports of all 3 running pods!
+Related trap — a selector with a typo compiles fine but matches nothing:
 
----
-
-### Lab 3: Test Internal DNS & Service Discovery via Diagnostic Pod
-
-Deploy the test client pod:
-```bash
-kubectl apply -f dns-test/curl-test-pod.yaml
-```
-
-Wait until running:
-```bash
-kubectl get pod curl-test-pod
-```
-
-Test DNS resolution from inside the cluster:
-```bash
-kubectl exec -it curl-test-pod -- nslookup yatri-backend-service
-```
-
-Expected output:
-```text
-Server:    10.96.0.10
-Address:   10.96.0.10#53
-
-Name:      yatri-backend-service.default.svc.cluster.local
-Address:   10.96.145.82
-```
-
-Send an HTTP request using the service name (no IP addresses needed):
-```bash
-kubectl exec -it curl-test-pod -- curl -s http://yatri-backend-service:80
-```
-
-Expected output:
-```text
-Backend v1.0.0 listening on port 5000
-```
-
-Query the healthcheck endpoint:
-```bash
-kubectl exec -it curl-test-pod -- curl -s http://yatri-backend-service/healthz
-```
-
-Expected output:
-```json
-{"status":"healthy","service":"yatri-backend"}
-```
-
----
-
-### Lab 4: Expose Backend Externally via NodePort
-
-Deploy the NodePort service:
-```bash
-kubectl apply -f service/nodeport.yaml
-```
-* Explanation: Opens port `30080` on every node and forwards to `port 80` -> `targetPort 5000`.
-
-Inspect the NodePort service:
-```bash
-kubectl get svc yatri-backend-nodeport
-```
-
-Expected output:
-```text
-NAME                     TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
-yatri-backend-nodeport   NodePort   10.96.210.44    <none>        80:30080/TCP   15s
-```
-
-Test access directly from your host terminal:
-```bash
-curl http://localhost:30080
-```
-
-Expected output:
-```text
-Backend v1.0.0 listening on port 5000
-```
-
----
-
-### Lab 5: Cloud LoadBalancer Service
-
-Deploy the LoadBalancer service:
-```bash
-kubectl apply -f service/loadbalancer.yaml
-```
-
-Inspect the service:
-```bash
-kubectl get svc yatri-backend-lb
-```
-
-Expected output (Local Minikube):
-```text
-NAME               TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
-yatri-backend-lb   LoadBalancer   10.96.180.11    <pending>     80:31254/TCP   10s
-```
-
-Expected output (AWS EKS):
-```text
-NAME               TYPE           CLUSTER-IP      EXTERNAL-IP                                            PORT(S)        AGE
-yatri-backend-lb   LoadBalancer   10.96.180.11    a1b2c3d4e5-987654321.us-east-1.elb.amazonaws.com     80:31254/TCP   45s
-```
-* Explanation: On bare-metal or local Minikube without a cloud controller or `minikube tunnel`, `EXTERNAL-IP` remains `<pending>`. In AWS EKS, AWS provisions an elastic Network Load Balancer automatically.
-
----
-
-### Lab 6: Triage the "Empty Endpoints" Failure Drill
-
-Deploy the intentionally broken service:
 ```bash
 kubectl apply -f troubleshooting/empty-endpoints.yaml
-```
-
-Check the endpoints:
-```bash
 kubectl get endpoints broken-backend-service
 ```
 
-Expected output:
-```text
+```
 NAME                     ENDPOINTS   AGE
-broken-backend-service   <none>      12s
+broken-backend-service   <none>      0s
 ```
 
-Attempt to curl the broken service from the diagnostic pod:
+`ENDPOINTS: <none>` is the first thing to check when a Service returns connection refused.
+
+![No selector](./screenshots/07-service-without-selector.png)
+
+---
+
+## Task 8 — CoreDNS, FQDN and `ndots:5`
+
 ```bash
-kubectl exec -it curl-test-pod -- curl --connect-timeout 3 http://broken-backend-service
+kubectl get pods -n kube-system -l k8s-app=kube-dns
+kubectl exec curl-client -- cat /etc/resolv.conf
 ```
 
-Expected output:
-```text
-curl: (28) Failed to connect to broken-backend-service port 80: Connection timed out
+```
+NAME                       READY   STATUS    IP
+coredns-559f6c778d-2jrzs   1/1     Running   10.244.0.2
+
+search default.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10
+options ndots:5
 ```
 
-#### The 3-Step Triage Formula:
-1. **Check Endpoints:** `kubectl get endpoints broken-backend-service` -> Displays `<none>`.
-2. **Inspect Service Selector:**
-   ```bash
-   kubectl describe svc broken-backend-service | grep Selector
-   ```
-   Output: `Selector: app=wrong-backend-name`
-3. **Compare Against Pod Labels:**
-   ```bash
-   kubectl get pods --show-labels
-   ```
-   Output: `app=yatri-backend`
-4. **Fix:** Update the service YAML so `spec.selector.app` matches `yatri-backend`.
+FQDN anatomy: `web-service-clusterip` **.** `default` **.** `svc` **.** `cluster.local`
+→ service **.** namespace **.** resource type **.** cluster domain
 
-Cleanup broken service:
+`ndots:5` means: any name with fewer than 5 dots gets every `search` suffix appended first. Watch it happen:
+
+```
+$ kubectl exec curl-client -- nslookup web-service-clusterip
+** server can't find web-service-clusterip.cluster.local: NXDOMAIN
+** server can't find web-service-clusterip.svc.cluster.local: NXDOMAIN
+Name:    web-service-clusterip.default.svc.cluster.local
+Address: 10.104.130.176
+```
+
+Two search suffixes are tried and fail (each repeated for A and AAAA) before the right one resolves. For an external call like `api.stripe.com` (2 dots < 5) every request pays 3 NXDOMAINs before the real lookup — a well-known source of latency and CoreDNS load in production. Fixes: use a trailing dot (`api.stripe.com.`) or set `dnsConfig.options ndots: 1` on the pod.
+
+![CoreDNS](./screenshots/08-coredns-fqdn.png)
+
+---
+
+## Task 9 — Pod identity: Deployment vs StatefulSet
+
+Both running, then delete one pod from each:
+
 ```bash
-kubectl delete -f troubleshooting/empty-endpoints.yaml
+kubectl delete pod web-app-clusterip-66865d4855-4tx8n
+kubectl delete pod web-stateful-0
+```
+
+**Before**
+
+```
+web-app-clusterip-66865d4855-4tx8n Running      web-stateful-0 Running
+web-app-clusterip-66865d4855-c49fh Running      web-stateful-1 Running
+web-app-clusterip-66865d4855-qg4zd Running      web-stateful-2 Running
+```
+
+**After**
+
+```
+web-app-clusterip-66865d4855-c49fh Running      web-stateful-0 Running
+web-app-clusterip-66865d4855-qg4zd Running      web-stateful-1 Running
+web-app-clusterip-66865d4855-xg2ss Running      web-stateful-2 Running
+        ^ new random suffix                            ^ same ordinal back
+```
+
+Deployment pods are cattle — the replacement has a new name, new IP, new DNS record. StatefulSet pods are pets — `web-stateful-0` comes back as `web-stateful-0`, with the same DNS name and the same PVC.
+
+![Pod identity](./screenshots/09-pod-identity.png)
+
+---
+
+## Task 10 — Deployment vs StatefulSet vs DaemonSet
+
+```
+$ kubectl get deploy,sts,ds
+deployment.apps/web-app-clusterip    3/3
+statefulset.apps/web-stateful        3/3
+daemonset.apps/node-logging-agent    2 desired / 2 ready
+```
+
+| | Deployment | StatefulSet | DaemonSet |
+| :--- | :--- | :--- | :--- |
+| **Workload** | Stateless APIs, web front ends | Databases, queues, anything clustered | Node-level agents |
+| **Pod names** | `<name>-<rs-hash>-<random>` | `<name>-0, -1, -2` | `<name>-<random>`, one per node |
+| **Identity** | Disposable | Stable name, DNS and storage | Tied to its node |
+| **Start / stop order** | Parallel, any order | Sequential 0→1→2, reverse on delete | Parallel on all nodes |
+| **Storage** | Shared or emptyDir | One PVC per ordinal (`volumeClaimTemplates`) | hostPath / node-local |
+| **Service** | ClusterIP / NodePort / LB | Headless (`clusterIP: None`) required | Usually none |
+| **Scaling** | `replicas: N`, anywhere | Ordinal, from the tail | Automatic with node count |
+| **Examples** | Nginx, Flask, Node API | Kafka, MongoDB, PostgreSQL, ZooKeeper | Fluentd, node-exporter, Cilium, Falco |
+
+![Controllers](./screenshots/10-controllers-overview.png)
+
+---
+
+## Task 11 — Cost & service selection
+
+### The LoadBalancer-per-service anti-pattern
+
+```
+BAD — one cloud LB per microservice
+  svc A ──► NLB 1  ($25/mo)
+  svc B ──► NLB 2  ($25/mo)
+  svc C ──► NLB 3  ($25/mo)
+  50 services = ~$1,250/month, 50 IPs to manage, 50 TLS certs
+
+GOOD — one LB, one Ingress controller
+  Internet ──► 1 LB ($25/mo) ──► NGINX Ingress Controller ──► ClusterIP A / B / C ...
+  50 services = ~$25/month, one IP, one cert, host+path routing
+```
+
+Same saving applies to certificates and DNS records, not just the LB bill.
+
+### Decision tree
+
+```
+Need access from outside the cluster?
+├── NO ──► need to address individual pods (Kafka, DB replicas)?
+│          ├── YES ──► Headless Service (clusterIP: None)
+│          └── NO  ──► ClusterIP
+└── YES ─► pointing at an external domain (RDS, Stripe)?
+           ├── YES ──► ExternalName
+           └── NO  ─► on a managed cloud?
+                      ├── YES + HTTP/HTTPS ──► one Ingress behind one LoadBalancer,
+                      │                        apps stay ClusterIP
+                      ├── YES + raw TCP/UDP ──► LoadBalancer
+                      └── NO (local / on-prem) ──► NodePort
 ```
 
 ---
 
-## 5-Minute Revision Checklist
+## Task 12 — Minikube Docker driver: why `<node-ip>:<nodePort>` fails
 
-* [ ] I can state the 3 Golden Rules of Kubernetes Pod Networking.
-* [ ] I understand why Pod IPs are ephemeral and why microservices require Services.
-* [ ] I can explain the Three Ports Triangle: `port` (Service Front Door), `targetPort` (Container Process), and `nodePort` (Worker Node IP).
-* [ ] I know that `ClusterIP` is internal only, while `NodePort` and `LoadBalancer` provide external access.
-* [ ] I can write the full Kubernetes DNS FQDN syntax: `<service>.<namespace>.svc.cluster.local`.
-* [ ] I know that `kubectl get endpoints <service>` is the #1 command to verify if a Service found healthy Pods.
-* [ ] I understand that `kube-proxy` programs Linux kernel `iptables` or `IPVS` rules to load-balance traffic across pods.
+```bash
+minikube ip                                          # 192.168.49.2
+minikube ssh -- curl -sI http://localhost:30080      # HTTP/1.1 200 OK     (inside the node)
+curl --connect-timeout 3 -sI http://192.168.49.2:30080
+```
 
----
+```
+curl: (28) connection timed out
+```
 
-## High-Frequency Interview Preparation
+**Cause:** with `--driver=docker` the "node" is a container on an internal Docker bridge network. On Linux that bridge lives in the host kernel, so `192.168.49.2` is routable. On macOS and Windows, Docker Desktop runs the daemon inside its own Linux VM — the host has no route to `192.168.49.x` at all. The node port is open; the address is simply unreachable from the Mac.
 
-### Beginner Level
+**Workaround 1 — loopback tunnel per service:**
 
-#### Q1. What is a Kubernetes Service and why is it necessary?
-* **Answer:** A Kubernetes Service is a networking abstraction that defines a logical set of Pods and a policy to access them. Because Pods are ephemeral and receive dynamic IP addresses that change on restart or scaling, Services provide a static virtual IP (ClusterIP) and a permanent DNS name. This ensures clients and other microservices can reliably communicate without tracking individual Pod IPs.
+```bash
+minikube service web-service-nodeport --url
+```
 
-#### Q2. What happens if a Service selector does not match any running Pod labels?
-* **Answer:** The Service will be created without errors, but its `Endpoints` object will remain empty (`<none>`). Any traffic sent to the Service will hang and fail with a connection timeout or connection refused because there are no backend destination Pods.
+```
+http://127.0.0.1:58179
+! Because you are using a Docker driver on darwin, the terminal needs to be open to run it.
 
----
+$ curl -sI http://127.0.0.1:58179 | head -1
+HTTP/1.1 200 OK
+```
 
-### Intermediate Level
+**Workaround 2 — `minikube tunnel`:** runs as root, adds host routes and binds privileged ports, so `type: LoadBalancer` services get `EXTERNAL-IP: 127.0.0.1` and plain `http://localhost` works. Also must stay open in its own terminal.
 
-#### Q3. Explain the difference between `NodePort` and `LoadBalancer`.
-* **Answer:**
-  * **`NodePort`:** Opens a dedicated high port from the range `30000–32767` on every worker node's physical IP address. External traffic must connect directly to a specific node IP on that non-standard port.
-  * **`LoadBalancer`:** The production-standard mechanism in cloud environments (AWS, GCP, Azure). It automatically provisions a cloud load balancer (e.g., AWS NLB) that accepts traffic on standard ports (`80`, `443`) with a public IP or DNS name and routes it across the cluster's NodePorts automatically.
+`kubectl port-forward svc/<name> 8080:80` works too and needs no sudo.
 
-#### Q4. How does `kube-proxy` direct traffic to Pods?
-* **Answer:** `kube-proxy` runs on every worker node as a DaemonSet. It monitors the API server for changes to Services and Endpoints. In modern Kubernetes clusters, it does not proxy traffic through user space; instead, it writes Linux kernel **`iptables`** rules or configures **`IPVS`** (IP Virtual Server) tables to intercept traffic destined for the Service Virtual IP and perform Destination NAT (DNAT) to healthy Pod IPs using random or round-robin balancing.
-
----
-
-### Advanced & Scenario-Based
-
-#### Q5. Scenario: A frontend pod cannot communicate with `http://yatri-backend-service`. Running `curl` inside the frontend pod times out. Walk through your step-by-step triage workflow.
-* **Answer:**
-  1. **Check Service Endpoints:** Run `kubectl get endpoints yatri-backend-service`. If it shows `<none>`, there is a label selector mismatch or pods are not ready.
-  2. **Verify Pod Labels and Readiness:** Run `kubectl get pods -l app=yatri-backend -o wide`. Ensure pods are in `Running` state and pass their Readiness Probes. (Pods failing readiness are automatically detached from Endpoints!).
-  3. **Verify Port Mapping:** Check the Service definition. Ensure `spec.ports.targetPort` matches the actual port where the backend process is listening (e.g., `5000` vs `80`).
-  4. **Verify DNS Resolution:** Exec into the frontend pod and run `nslookup yatri-backend-service`. Confirm CoreDNS resolves the name to the Service ClusterIP.
-  5. **Check NetworkPolicies:** Verify no Kubernetes `NetworkPolicy` is blocking egress from the frontend or ingress into the backend namespace.
+![Docker driver gotcha](./screenshots/12-minikube-driver-gotcha.png)
 
 ---
 
-## Homework & Hands-on Challenge
+## Cleanup
 
-1. Deploy `deployment/backend-deployment.yaml` and scale it from 3 to 6 replicas using `kubectl scale deployment yatri-backend --replicas=6`.
-2. Run `kubectl get endpoints yatri-backend-service` and observe how all 6 pod IPs are immediately added to the endpoints list.
-3. Scale the deployment down to 1 replica and verify the endpoints list shrinks dynamically.
-4. Intentionally change `targetPort` in `service/clusterip.yaml` to `9999` and observe the exact error when curling from `curl-test-pod`.
-
----
-
-## Next Session Connection
-
-In **Session 12: Kubernetes Ingress, ConfigMaps & Secrets**, NodePort opens too many non-standard ports (`:30080`) and LoadBalancer gets expensive if you create one per microservice. You will learn how **Ingress Controllers** route traffic from a single public domain (`yatri.com/api` vs `yatri.com/app`) and manage configuration and passwords securely with ConfigMaps and Secrets.
+```bash
+kubectl delete -f 01-clusterip/ -f 02-nodeport/ -f 03-loadbalancer/ -f 04-externalname/ -f 05-headless/ -f 06-no-selector/ --ignore-not-found
+```

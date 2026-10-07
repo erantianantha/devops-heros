@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: student-pvc
+spec:
+  # "" opts out of the default StorageClass. Without it, the DefaultStorageClass
+  # admission plugin sets "standard", the claim is dynamically provisioned, and
+  # student-pv (class "") is never used.
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi

@@ -1,0 +1,25 @@
+# Pod networking: the app listens on 127.0.0.1 only, so nothing outside the Pod can reach it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: net-demo
+  labels:
+    app: net-demo
+spec:
+  containers:
+    - name: app
+      image: python:3.11-alpine
+      command: ["python3", "-m", "http.server", "8080", "--bind", "127.0.0.1"]
+      ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: net-demo
+spec:
+  selector:
+    app: net-demo
+  ports:
+    - port: 80
+      targetPort: 8080

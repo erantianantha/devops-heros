@@ -1,0 +1,101 @@
+name: Session 16 - CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "session-16-github-actions/homework/cicd-demo/**"
+      - ".github/workflows/session16-cicd.yml"
+  workflow_dispatch:
+
+env:
+  APP_DIR: session-16-github-actions/homework/cicd-demo
+  IMAGE: ghcr.io/${{ github.repository_owner }}/session16-calculator
+
+defaults:
+  run:
+    working-directory: session-16-github-actions/homework/cicd-demo
+
+jobs:
+  # ---------------- CI ----------------
+  test:
+    name: CI - Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pytest -v --junitxml=test-results.xml
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: ${{ env.APP_DIR }}/test-results.xml
+
+  build:
+    name: CI - Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash build.sh && cat build/build-info.txt
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: calculator-build
+          path: ${{ env.APP_DIR }}/build/
+
+  # ---------------- CD ----------------
+  docker:
+    name: CD - Build & push image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR (uses the built-in GITHUB_TOKEN secret)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest .
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
+
+  deploy:
+    name: CD - Deploy to Kubernetes (kind)
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: helm/kind-action@v1.10.0
+      - name: Load image into kind
+        run: |
+          docker pull $IMAGE:${{ github.sha }}
+          kind load docker-image $IMAGE:${{ github.sha }} --name chart-testing
+      - name: Deploy
+        run: |
+          sed -i "s|IMAGE_PLACEHOLDER|$IMAGE:${{ github.sha }}|" k8s/deployment.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl rollout status deployment/calculator --timeout=120s
+          kubectl get pods -o wide
+      - name: Smoke test
+        run: |
+          kubectl port-forward svc/calculator 8080:80 &
+          sleep 3
+          curl -sf "http://localhost:8080/add?a=10&b=5"
+          curl -sf "http://localhost:8080/health"

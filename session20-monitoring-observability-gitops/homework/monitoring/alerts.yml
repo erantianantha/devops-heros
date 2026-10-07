@@ -1,0 +1,12 @@
+groups:
+  - name: demo
+    rules:
+      - alert: TargetDown              # application health
+        expr: up == 0
+        for: 10s
+        labels: {severity: critical}
+        annotations: {summary: "{{ $labels.job }} is down"}
+      - alert: HighMemory              # memory utilization
+        expr: process_resident_memory_bytes > 500e6
+        for: 1m
+        labels: {severity: warning}

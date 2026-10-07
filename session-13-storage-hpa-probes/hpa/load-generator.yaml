@@ -1,0 +1,30 @@
+# In-cluster alternative to load_generator.sh for yatri-backend-hpa.
+#
+# load_generator.sh drives load from the laptop through `kubectl port-forward`. On macOS
+# that never reached the cluster: AirPlay Receiver already listens on :5000. On a free port
+# the tunnel timed out after ~500 connections, and it pins every request to a single Pod.
+# Running the loop inside the cluster sends traffic through the Service to every replica.
+#
+# $YATRI_BACKEND_SERVICE_SERVICE_HOST is the Service ClusterIP injected by kubelet (no DNS
+# lookup per request). It only exists if the Service was created before these Pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yatri-load-generator
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: yatri-load-generator
+  template:
+    metadata:
+      labels:
+        app: yatri-load-generator
+    spec:
+      containers:
+        - name: busybox
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - "while true; do wget -q -O- http://$YATRI_BACKEND_SERVICE_SERVICE_HOST/healthz > /dev/null; done"
