@@ -22,8 +22,6 @@ YAML used: `../01-volumes`, `../02-persistent-storage`, `../03-storageclass` (in
 - Key fields: `capacity`, `accessModes` (RWO / ROX / RWX / RWOP), `reclaimPolicy` (Retain / Delete).
 - `Retain`: deleting the PVC leaves the PV `Released` with data intact; it won't rebind until `claimRef` is removed.
 
-![Retain](../screenshots/05-pv-retain-released.png)
-
 ## PersistentVolumeClaim (PVC)
 - A namespaced request for storage; Pods only reference PVCs. Binds on class + access mode + size.
 - **Gotcha:** the instructor's `pvc.yaml` has no `storageClassName`, so the default `standard` class was stamped on it and it got a new dynamic PV; `student-pv` stayed `Available`.
@@ -31,7 +29,6 @@ YAML used: `../01-volumes`, `../02-persistent-storage`, `../03-storageclass` (in
 - A PVC gets the **whole** PV (asked 500Mi, got 1Gi).
 
 ![default class](../screenshots/03-pvc-default-storageclass.png)
-![static bound](../screenshots/04-pv-pvc-static-bound.png)
 
 ## StorageClass & dynamic provisioning
 - StorageClass = template: provisioner + reclaim policy + binding mode. One can be marked default.

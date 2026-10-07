@@ -21,18 +21,9 @@ See [`01-kubernetes-volumes/README.md`](01-kubernetes-volumes/README.md).
 
 ![no metrics](screenshots/07-hpa-unknown-no-metrics.png)
 ![metrics-server](screenshots/08-metrics-server.png)
-![load](screenshots/09-hpa-load-generator.png)
-![more load](screenshots/10-hpa-increase-load.png)
-![dns bottleneck](screenshots/11-hpa-load-dns-bottleneck.png)
 ![scaled](screenshots/12-hpa-scaled-out.png)
 ![describe](screenshots/13-hpa-describe.png)
 ![scale down](screenshots/14-hpa-scale-down.png)
-![hpa -w](screenshots/15-hpa-watch.png)
-![pods -w](screenshots/16-hpa-pods-watch.png)
-![yatri](screenshots/20-yatri-hpa.png)
-![port 5000](screenshots/21-yatri-port5000.png)
-![port-forward](screenshots/22-yatri-portforward.png)
-![yatri in-cluster](screenshots/23-yatri-hpa-incluster.png)
 
 ## Probes (`05-probes/`)
 - **Startup:** "has it booted?" (`2s × 30 = 60s` budget). Liveness/readiness wait for it.
@@ -40,7 +31,6 @@ See [`01-kubernetes-volumes/README.md`](01-kubernetes-volumes/README.md).
 - **Liveness** broken → restart every ~20s → `CrashLoopBackOff`.
 - Gotcha: probe fields on a bare Pod are immutable, so `kubectl apply` fails; use `kubectl replace --force`.
 
-![healthy](screenshots/17-probes-healthy.png)
 ![readiness](screenshots/18-probes-readiness-broken.png)
 ![liveness](screenshots/19-probes-liveness-broken.png)
 
@@ -62,15 +52,6 @@ See [`01-kubernetes-volumes/README.md`](01-kubernetes-volumes/README.md).
 
 ![deploy](screenshots/24-mini-deploy.png)
 ![split](screenshots/25-mini-storage-split.png)
-![root cause](screenshots/26-mini-storage-rootcause.png)
-![fix attempt](screenshots/27-mini-fix-attempt.png)
-![429](screenshots/28-mini-provisioner-429.png)
 ![fixed](screenshots/29-mini-storage-fixed.png)
-![service](screenshots/30-mini-service.png)
 ![hpa](screenshots/31-mini-hpa.png)
-![liveness under load](screenshots/32-mini-liveness-under-load.png)
-![conntrack](screenshots/33-conntrack-root-cause.png)
-![scale down](screenshots/34-mini-scale-down.png)
-![bonus 1](screenshots/35-bonus1-target-30.png)
 ![bonus 2](screenshots/36-bonus2-readiness-gating.png)
-![bonus 3](screenshots/37-bonus3-liveness-loop.png)
