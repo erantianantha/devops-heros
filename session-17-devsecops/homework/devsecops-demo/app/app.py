@@ -231,4 +231,5 @@ def server_error(e):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    # Debug mode exposes the Werkzeug debugger (remote code execution); only on when explicitly asked.
+    app.run(host="0.0.0.0", port=5001, debug=os.environ.get("FLASK_DEBUG") == "1")  # nosec B104 - container must listen on all interfaces
